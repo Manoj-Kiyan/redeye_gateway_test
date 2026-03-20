@@ -98,10 +98,16 @@ pub fn decrypt_api_key(encrypted_data: &[u8]) -> Result<String, AppError> {
 pub struct Claims {
     pub sub: String, // User ID
     pub tenant_id: String,
+    #[serde(default = "default_role")]
+    pub role: String,
     pub exp: usize,
 }
 
-pub fn generate_jwt(user_id: Uuid, tenant_id: Uuid) -> Result<String, AppError> {
+fn default_role() -> String {
+    "owner".to_string()
+}
+
+pub fn generate_jwt(user_id: Uuid, tenant_id: Uuid, role: &str) -> Result<String, AppError> {
     let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "secret".to_string());
     let expiration = Utc::now()
         .checked_add_signed(Duration::minutes(15))
@@ -111,6 +117,7 @@ pub fn generate_jwt(user_id: Uuid, tenant_id: Uuid) -> Result<String, AppError> 
     let claims = Claims {
         sub: user_id.to_string(),
         tenant_id: tenant_id.to_string(),
+        role: role.to_string(),
         exp: expiration,
     };
 
@@ -125,7 +132,7 @@ pub fn generate_jwt(user_id: Uuid, tenant_id: Uuid) -> Result<String, AppError> 
     })
 }
 
-pub fn generate_refresh_token(user_id: Uuid, tenant_id: Uuid) -> Result<String, AppError> {
+pub fn generate_refresh_token(user_id: Uuid, tenant_id: Uuid, role: &str) -> Result<String, AppError> {
     let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "secret".to_string());
     let expiration = Utc::now()
         .checked_add_signed(Duration::days(7))
@@ -135,6 +142,7 @@ pub fn generate_refresh_token(user_id: Uuid, tenant_id: Uuid) -> Result<String, 
     let claims = Claims {
         sub: user_id.to_string(),
         tenant_id: tenant_id.to_string(),
+        role: role.to_string(),
         exp: expiration,
     };
 

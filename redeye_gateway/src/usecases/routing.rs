@@ -41,6 +41,38 @@ pub async fn resolve_routing_decision(
     })
 }
 
+pub async fn resolve_fallback_routing_decision(
+    state: &AppState,
+    tenant_id: &str,
+    failed_provider: ProviderKind,
+) -> Result<Option<RoutingDecision>, GatewayError> {
+    if tenant_id == "anonymous" {
+        return Ok(None);
+    }
+
+    let default_route = routing_repository::fetch_default_tenant_route(&state.db_pool, tenant_id).await?;
+    let Some(default_route) = default_route else {
+        return Ok(None);
+    };
+
+    if default_route.provider == failed_provider {
+        return Ok(None);
+    }
+
+    let upstream_api_key = match credential_repository::fetch_provider_api_key(state, tenant_id, default_route.provider).await {
+        Ok(api_key) => api_key,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(Some(RoutingDecision {
+        provider: default_route.provider,
+        requested_model: default_route.requested_model.clone(),
+        effective_model: default_route.effective_model,
+        tenant_id: tenant_id.to_string(),
+        upstream_api_key,
+    }))
+}
+
 async fn load_tenant_routes(state: &AppState, tenant_id: &str) -> Result<Vec<TenantRoutePolicy>, GatewayError> {
     if tenant_id == "anonymous" {
         return Ok(Vec::new());
@@ -93,4 +125,94 @@ fn infer_provider(model: &str) -> Option<ProviderKind> {
     [ProviderKind::OpenAi, ProviderKind::Anthropic, ProviderKind::Gemini]
         .into_iter()
         .find(|provider| provider.supports_model(model))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_provider, select_route_policy};
+    use crate::{
+        config::{CircuitBreakerConfig, GatewayConfig, ProviderRegistry, RateLimitConfig, ServiceUrls},
+        domain::{provider::ProviderKind, routing::TenantRoutePolicy},
+    };
+
+    fn test_config() -> GatewayConfig {
+        GatewayConfig {
+            port: 8080,
+            database_url: "postgres://local".to_string(),
+            redis_url: "redis://local".to_string(),
+            service_urls: ServiceUrls {
+                cache_url: "http://localhost:8081".to_string(),
+                clickhouse_url: "http://localhost:8123".to_string(),
+                tracer_url: "http://localhost:8082".to_string(),
+            },
+            rate_limit: RateLimitConfig {
+                max_requests: 60,
+                window_secs: 60,
+            },
+            circuit_breaker: CircuitBreakerConfig {
+                failure_threshold: 3,
+                open_window_secs: 30,
+            },
+            providers: ProviderRegistry {
+                default_provider: ProviderKind::OpenAi,
+                openai_api_key: "dummy".to_string(),
+                anthropic_api_key: None,
+                gemini_api_key: None,
+            },
+        }
+    }
+
+    #[test]
+    fn infer_provider_uses_model_prefixes() {
+        assert_eq!(infer_provider("gpt-4o"), Some(ProviderKind::OpenAi));
+        assert_eq!(infer_provider("claude-3-5-sonnet-latest"), Some(ProviderKind::Anthropic));
+        assert_eq!(infer_provider("gemini-1.5-pro"), Some(ProviderKind::Gemini));
+        assert_eq!(infer_provider("unknown-model"), None);
+    }
+
+    #[test]
+    fn select_route_policy_prefers_explicit_tenant_route() {
+        let config = test_config();
+        let routes = vec![TenantRoutePolicy {
+            tenant_id: "tenant-1".to_string(),
+            requested_model: "gpt-4o-mini".to_string(),
+            effective_model: "gpt-4o-mini".to_string(),
+            provider: ProviderKind::OpenAi,
+            is_default: true,
+        }];
+
+        let selected = select_route_policy(&config, "tenant-1", "gpt-4o-mini", &routes).unwrap();
+        assert_eq!(selected.provider, ProviderKind::OpenAi);
+        assert_eq!(selected.requested_model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn select_route_policy_rejects_unconfigured_tenant_model() {
+        let config = test_config();
+        let routes = vec![TenantRoutePolicy {
+            tenant_id: "tenant-1".to_string(),
+            requested_model: "gpt-4o-mini".to_string(),
+            effective_model: "gpt-4o-mini".to_string(),
+            provider: ProviderKind::OpenAi,
+            is_default: true,
+        }];
+
+        let error = select_route_policy(&config, "tenant-1", "claude-3-5-sonnet-latest", &routes)
+            .expect_err("expected unconfigured model to fail");
+
+        match error {
+            crate::domain::models::GatewayError::Routing(message) => {
+                assert!(message.contains("Allowed models"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn select_route_policy_uses_inferred_provider_when_no_routes_exist() {
+        let config = test_config();
+        let selected = select_route_policy(&config, "tenant-1", "gemini-1.5-pro", &[]).unwrap();
+        assert_eq!(selected.provider, ProviderKind::Gemini);
+        assert!(selected.is_default);
+    }
 }

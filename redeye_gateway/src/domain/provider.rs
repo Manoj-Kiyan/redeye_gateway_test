@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     OpenAi,
     Anthropic,
@@ -51,4 +52,36 @@ impl ProviderKind {
 #[allow(dead_code)]
 pub struct ProviderCredentials {
     pub api_key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderKind;
+
+    #[test]
+    fn provider_model_support_matches_expected_prefixes() {
+        assert!(ProviderKind::OpenAi.supports_model("gpt-4o"));
+        assert!(ProviderKind::OpenAi.supports_model("gpt-5-mini"));
+        assert!(ProviderKind::OpenAi.supports_model("o3-mini"));
+        assert!(!ProviderKind::OpenAi.supports_model("claude-3-5-sonnet-latest"));
+
+        assert!(ProviderKind::Anthropic.supports_model("claude-3-5-sonnet-latest"));
+        assert!(!ProviderKind::Anthropic.supports_model("gemini-1.5-pro"));
+
+        assert!(ProviderKind::Gemini.supports_model("gemini-1.5-pro"));
+        assert!(!ProviderKind::Gemini.supports_model("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn provider_catalogs_are_non_empty_and_unique() {
+        for provider in [ProviderKind::OpenAi, ProviderKind::Anthropic, ProviderKind::Gemini] {
+            let catalog = provider.catalog_models();
+            assert!(!catalog.is_empty());
+
+            let mut seen = std::collections::HashSet::new();
+            for model in catalog {
+                assert!(seen.insert(model), "duplicate model in catalog: {model}");
+            }
+        }
+    }
 }

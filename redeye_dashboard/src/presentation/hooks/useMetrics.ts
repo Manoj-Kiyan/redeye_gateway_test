@@ -24,8 +24,17 @@ export function useMetrics() {
 
     const fetchMetrics = async () => {
       try {
+        const token = localStorage.getItem('re_token');
+        if (!token) {
+          throw new Error('Sign in required to load gateway metrics');
+        }
+
         const res = await fetch('http://localhost:8080/v1/admin/metrics', {
-          signal: abortController.signal
+          signal: abortController.signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+          },
         });
         
         if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch metrics`);

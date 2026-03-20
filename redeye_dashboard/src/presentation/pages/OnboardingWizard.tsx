@@ -29,17 +29,13 @@ export function OnboardingWizard() {
 
   async function handleFinish(e: FormEvent) {
     e.preventDefault();
-    if (!openAiApiKey.trim()) {
-      setError('OpenAI API key is required to complete onboarding.');
-      return;
-    }
 
     setError(null);
     setLoading(true);
     try {
       await completeOnboarding({
         workspaceName: workspaceName.trim(),
-        openAiApiKey: openAiApiKey.trim(),
+        openAiApiKey: openAiApiKey.trim() || undefined,
         anthropicApiKey: anthropicApiKey.trim() || undefined,
         geminiApiKey: geminiApiKey.trim() || undefined,
       });
@@ -113,11 +109,10 @@ export function OnboardingWizard() {
             <form onSubmit={handleFinish} className="space-y-4">
               <CredentialField
                 label="OpenAI API Key"
-                required
                 value={openAiApiKey}
                 onChange={setOpenAiApiKey}
                 placeholder="sk-..."
-                helper="Required for onboarding and current default gateway path."
+                helper="Optional for now. Add it now for live OpenAI traffic, or skip and configure later in Settings."
               />
               <CredentialField
                 label="Anthropic API Key"
@@ -137,6 +132,10 @@ export function OnboardingWizard() {
               <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-200 flex gap-3 items-start">
                 <ShieldCheck className="w-4 h-4 mt-0.5 flex-shrink-0" />
                 <p>Provider keys are encrypted before storage. Raw secrets are never shown again after submission.</p>
+              </div>
+
+              <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-3 text-sm text-slate-300">
+                You can finish onboarding without provider keys and add them later from Settings. Gateway traffic will stay in configuration-only mode until a provider is connected.
               </div>
 
               {error && <ErrorBanner error={error} type="error" onClose={() => setError(null)} />}

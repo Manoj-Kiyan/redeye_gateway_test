@@ -21,6 +21,15 @@ pub async fn fetch_tenant_routes(
     rows.into_iter().map(map_row_to_policy).collect()
 }
 
+pub async fn fetch_default_tenant_route(
+    db_pool: &sqlx::PgPool,
+    tenant_id: &str,
+) -> Result<Option<TenantRoutePolicy>, GatewayError> {
+    let routes = fetch_tenant_routes(db_pool, tenant_id).await?;
+    let default_route = routes.into_iter().find(|route| route.is_default);
+    Ok(default_route)
+}
+
 pub async fn replace_tenant_routes(
     db_pool: &sqlx::PgPool,
     tenant_id: &str,

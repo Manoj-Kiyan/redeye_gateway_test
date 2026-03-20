@@ -36,6 +36,9 @@ pub enum GatewayError {
 
     #[error("Provider routing failed: {0}")]
     Routing(String),
+
+    #[error("Provider circuit breaker is open: {0}")]
+    CircuitOpen(String),
 }
 
 impl axum::response::IntoResponse for GatewayError {
@@ -63,6 +66,10 @@ impl axum::response::IntoResponse for GatewayError {
             GatewayError::Routing(_) => (
                 StatusCode::BAD_REQUEST,
                 "The requested model or provider is not available for this tenant.",
+            ),
+            GatewayError::CircuitOpen(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The upstream provider is temporarily unavailable. Please retry shortly.",
             ),
         };
 

@@ -1,4 +1,4 @@
-use axum::{extract::State, Json, http::{HeaderMap, HeaderValue, header::SET_COOKIE}};
+use axum::{extract::{Path, State}, Json, http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE}};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use crate::{AppState, error::AppError, infrastructure::security::{hash_password, verify_password, generate_jwt, encrypt_api_key, generate_redeye_api_key, verify_jwt, generate_refresh_token}};
@@ -21,6 +21,7 @@ pub struct AuthResponse {
     pub onboarding_complete: bool,
     pub token: String,
     pub redeye_api_key: Option<String>,
+    pub role: String,
 }
 
 #[derive(Serialize)]
@@ -37,6 +38,24 @@ pub struct UpdateProviderCredentialsRequest {
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TenantMember {
+    pub id: Uuid,
+    pub email: String,
+    pub role: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize)]
+pub struct TenantMembersResponse {
+    pub members: Vec<TenantMember>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMemberRoleRequest {
+    pub role: String,
 }
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -69,10 +88,12 @@ pub async fn signup(
         })?
         .get("id");
 
-    let user_id: Uuid = sqlx::query("INSERT INTO users (email, password_hash, tenant_id) VALUES ($1, $2, $3) RETURNING id")
+    let user_role = "owner";
+    let user_id: Uuid = sqlx::query("INSERT INTO users (email, password_hash, tenant_id, role) VALUES ($1, $2, $3, $4) RETURNING id")
         .bind(&payload.email)
         .bind(&hashed_pw)
         .bind(tenant_id)
+        .bind(user_role)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
@@ -87,8 +108,8 @@ pub async fn signup(
 
     tx.commit().await?;
 
-    let token = generate_jwt(user_id, tenant_id)?;
-    let refresh_token = generate_refresh_token(user_id, tenant_id)?;
+    let token = generate_jwt(user_id, tenant_id, user_role)?;
+    let refresh_token = generate_refresh_token(user_id, tenant_id, user_role)?;
 
     let cookie = format!("refresh_token={}; HttpOnly; Path=/; Max-Age=604800; SameSite=Strict", refresh_token);
     let mut headers = HeaderMap::new();
@@ -102,6 +123,7 @@ pub async fn signup(
         onboarding_complete: false,
         token,
         redeye_api_key: None,
+        role: user_role.to_string(),
     })))
 }
 
@@ -115,7 +137,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let row = sqlx::query("SELECT u.id, u.password_hash, u.tenant_id, t.name as workspace_name, t.onboarding_status, t.redeye_api_key FROM users u JOIN tenants t ON u.tenant_id = t.id WHERE u.email = $1")
+    let row = sqlx::query("SELECT u.id, u.password_hash, u.tenant_id, u.role, t.name as workspace_name, t.onboarding_status, t.redeye_api_key FROM users u JOIN tenants t ON u.tenant_id = t.id WHERE u.email = $1")
         .bind(&payload.email)
         .fetch_optional(&state.db_pool)
         .await?;
@@ -133,12 +155,13 @@ pub async fn login(
 
     let user_id: Uuid = user_row.get("id");
     let tenant_id: Uuid = user_row.get("tenant_id");
+    let role: String = user_row.get("role");
     let workspace_name: String = user_row.get("workspace_name");
     let onboarding_complete: bool = user_row.get("onboarding_status");
     let redeye_api_key: Option<String> = user_row.get("redeye_api_key");
 
-    let token = generate_jwt(user_id, tenant_id)?;
-    let refresh_token = generate_refresh_token(user_id, tenant_id)?;
+    let token = generate_jwt(user_id, tenant_id, &role)?;
+    let refresh_token = generate_refresh_token(user_id, tenant_id, &role)?;
 
     let cookie = format!("refresh_token={}; HttpOnly; Path=/; Max-Age=604800; SameSite=Strict", refresh_token);
     let mut headers = HeaderMap::new();
@@ -152,6 +175,7 @@ pub async fn login(
         onboarding_complete,
         token,
         redeye_api_key,
+        role,
     })))
 }
 
@@ -162,7 +186,7 @@ pub async fn refresh(
     let claims = extract_claims_from_cookie(&headers)?;
     let user_id = Uuid::parse_str(&claims.sub).unwrap_or_default();
     let tenant_id = Uuid::parse_str(&claims.tenant_id).unwrap_or_default();
-    let token = generate_jwt(user_id, tenant_id)?;
+    let token = generate_jwt(user_id, tenant_id, &claims.role)?;
 
     let email: String = sqlx::query("SELECT email FROM users WHERE id = $1")
         .bind(user_id)
@@ -183,12 +207,13 @@ pub async fn refresh(
         onboarding_complete: row.get("onboarding_status"),
         token,
         redeye_api_key: row.get("redeye_api_key"),
+        role: claims.role,
     }))
 }
 
 #[derive(Deserialize)]
 pub struct OnboardRequest {
-    pub openai_api_key: String,
+    pub openai_api_key: Option<String>,
     pub workspace_name: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
@@ -202,27 +227,43 @@ pub async fn onboard(
     let claims = extract_claims_from_bearer(&headers)?;
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Internal("Invalid tenant ID in token".into()))?;
     let user_id = Uuid::parse_str(&claims.sub).unwrap_or_default();
-
-    let encrypted_openai_key = encrypt_api_key(&payload.openai_api_key)?;
-    let redeye_api_key = generate_redeye_api_key();
+    ensure_minimum_role(&claims.role, "admin")?;
 
     let mut tx = state.db_pool.begin().await?;
+    let redeye_api_key = current_or_new_redeye_api_key(&state.db_pool, tenant_id).await?;
 
-    sqlx::query("UPDATE tenants SET encrypted_openai_key = $1, redeye_api_key = $2, onboarding_status = true WHERE id = $3")
-        .bind(&encrypted_openai_key)
+    sqlx::query("UPDATE tenants SET redeye_api_key = $1, onboarding_status = true WHERE id = $2")
         .bind(&redeye_api_key)
         .bind(tenant_id)
         .execute(&mut *tx)
         .await?;
 
-    upsert_provider_credential(&mut tx, tenant_id, "openai", &payload.openai_api_key).await?;
+    let openai_configured = if let Some(api_key) = payload.openai_api_key.as_deref().filter(|value| !value.trim().is_empty()) {
+        let encrypted_openai_key = encrypt_api_key(api_key)?;
+        sqlx::query("UPDATE tenants SET encrypted_openai_key = $1 WHERE id = $2")
+            .bind(&encrypted_openai_key)
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await?;
+        upsert_provider_credential(&mut tx, tenant_id, "openai", api_key).await?;
+        true
+    } else {
+        false
+    };
 
-    if let Some(api_key) = payload.anthropic_api_key.as_deref().filter(|value| !value.trim().is_empty()) {
+    let anthropic_configured = if let Some(api_key) = payload.anthropic_api_key.as_deref().filter(|value| !value.trim().is_empty()) {
         upsert_provider_credential(&mut tx, tenant_id, "anthropic", api_key).await?;
-    }
-    if let Some(api_key) = payload.gemini_api_key.as_deref().filter(|value| !value.trim().is_empty()) {
+        true
+    } else {
+        false
+    };
+
+    let gemini_configured = if let Some(api_key) = payload.gemini_api_key.as_deref().filter(|value| !value.trim().is_empty()) {
         upsert_provider_credential(&mut tx, tenant_id, "gemini", api_key).await?;
-    }
+        true
+    } else {
+        false
+    };
 
     let final_workspace_name = if let Some(ws_name) = &payload.workspace_name {
         sqlx::query("UPDATE tenants SET name = $1 WHERE id = $2")
@@ -251,9 +292,9 @@ pub async fn onboard(
         json!({
             "workspace_name": final_workspace_name,
             "providers": {
-                "openai": true,
-                "anthropic": payload.anthropic_api_key.as_deref().is_some_and(|value| !value.trim().is_empty()),
-                "gemini": payload.gemini_api_key.as_deref().is_some_and(|value| !value.trim().is_empty()),
+                "openai": openai_configured,
+                "anthropic": anthropic_configured,
+                "gemini": gemini_configured,
             }
         }),
     ).await?;
@@ -270,8 +311,9 @@ pub async fn onboard(
         tenant_id,
         workspace_name: final_workspace_name,
         onboarding_complete: true,
-        token: generate_jwt(user_id, tenant_id)?,
+        token: generate_jwt(user_id, tenant_id, &claims.role)?,
         redeye_api_key: Some(redeye_api_key),
+        role: claims.role,
     }))
 }
 
@@ -323,6 +365,7 @@ pub async fn update_provider_credentials(
     let claims = extract_claims_from_bearer(&headers)?;
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Internal("Invalid tenant ID in token".into()))?;
     let actor_user_id = Uuid::parse_str(&claims.sub).ok();
+    ensure_minimum_role(&claims.role, "admin")?;
 
     let mut tx = state.db_pool.begin().await?;
     let mut updated_providers = Vec::new();
@@ -367,6 +410,64 @@ pub async fn update_provider_credentials(
     get_provider_status(State(state), headers).await
 }
 
+pub async fn get_tenant_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TenantMembersResponse>, AppError> {
+    let claims = extract_claims_from_bearer(&headers)?;
+    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Internal("Invalid tenant ID in token".into()))?;
+    ensure_minimum_role(&claims.role, "admin")?;
+
+    let rows = sqlx::query("SELECT id, email, role, created_at FROM users WHERE tenant_id = $1 ORDER BY created_at ASC")
+        .bind(tenant_id)
+        .fetch_all(&state.db_pool)
+        .await?;
+
+    let members = rows.into_iter().map(|row| TenantMember {
+        id: row.get("id"),
+        email: row.get("email"),
+        role: row.get("role"),
+        created_at: row.get("created_at"),
+    }).collect();
+
+    Ok(Json(TenantMembersResponse { members }))
+}
+
+pub async fn update_member_role(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(member_id): Path<Uuid>,
+    Json(payload): Json<UpdateMemberRoleRequest>,
+) -> Result<StatusCode, AppError> {
+    let claims = extract_claims_from_bearer(&headers)?;
+    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Internal("Invalid tenant ID in token".into()))?;
+    let actor_user_id = Uuid::parse_str(&claims.sub).ok();
+    ensure_minimum_role(&claims.role, "owner")?;
+    ensure_valid_role(&payload.role)?;
+
+    sqlx::query("UPDATE users SET role = $1 WHERE id = $2 AND tenant_id = $3")
+        .bind(&payload.role)
+        .bind(member_id)
+        .bind(tenant_id)
+        .execute(&state.db_pool)
+        .await?;
+
+    write_audit_log(
+        &state.db_pool,
+        tenant_id,
+        actor_user_id,
+        "auth",
+        "member_role_updated",
+        "users",
+        json!({
+            "member_id": member_id,
+            "role": payload.role,
+        }),
+    ).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn upsert_provider_credential(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
@@ -383,6 +484,19 @@ async fn upsert_provider_credential(
         .await?;
 
     Ok(())
+}
+
+async fn current_or_new_redeye_api_key(
+    db_pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+) -> Result<String, AppError> {
+    let existing_key = sqlx::query("SELECT redeye_api_key FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_one(db_pool)
+        .await?
+        .get::<Option<String>, _>("redeye_api_key");
+
+    Ok(existing_key.unwrap_or_else(generate_redeye_api_key))
 }
 
 fn extract_claims_from_bearer(headers: &HeaderMap) -> Result<crate::infrastructure::security::Claims, AppError> {
@@ -406,6 +520,28 @@ fn extract_claims_from_cookie(headers: &HeaderMap) -> Result<crate::infrastructu
         .ok_or_else(|| AppError::Unauthorized("Refresh token cookie not found".into()))?;
 
     verify_jwt(refresh_token)
+}
+
+fn ensure_valid_role(role: &str) -> Result<(), AppError> {
+    match role {
+        "owner" | "admin" | "viewer" => Ok(()),
+        _ => Err(AppError::BadRequest("Invalid role. Allowed values: owner, admin, viewer".into())),
+    }
+}
+
+fn ensure_minimum_role(current_role: &str, minimum_role: &str) -> Result<(), AppError> {
+    let rank = |role: &str| match role {
+        "owner" => 3,
+        "admin" => 2,
+        "viewer" => 1,
+        _ => 0,
+    };
+
+    if rank(current_role) < rank(minimum_role) {
+        return Err(AppError::Unauthorized(format!("{} role required", minimum_role)));
+    }
+
+    Ok(())
 }
 
 async fn write_audit_log(

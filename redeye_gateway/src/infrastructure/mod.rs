@@ -7,3 +7,4 @@ pub mod provider_client;
 pub mod routing_repository;
 pub mod credential_repository;
 pub mod audit_repository;
+pub mod circuit_breaker;

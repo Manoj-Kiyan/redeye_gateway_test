@@ -16,7 +16,7 @@ export interface SignupPayload {
 
 export interface OnboardingPayload {
   workspaceName: string;
-  openAiApiKey: string;
+  openAiApiKey?: string;
   anthropicApiKey?: string;
   geminiApiKey?: string;
 }

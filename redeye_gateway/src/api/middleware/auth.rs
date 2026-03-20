@@ -16,7 +16,13 @@ use crate::domain::models::AppState;
 pub struct Claims {
     pub sub: String,
     pub tenant_id: String,
+    #[serde(default = "default_role")]
+    pub role: String,
     pub exp: usize,
+}
+
+fn default_role() -> String {
+    "owner".to_string()
 }
 
 pub async fn auth_middleware(
@@ -77,6 +83,7 @@ async fn handle_jwt(
     let user_id = Uuid::parse_str(&token_data.claims.sub).unwrap_or_default();
     req.headers_mut().insert("x-tenant-id", tenant_id.to_string().parse().unwrap());
     req.headers_mut().insert("x-user-id", user_id.to_string().parse().unwrap());
+    req.headers_mut().insert("x-user-role", token_data.claims.role.parse().unwrap());
 
     Ok(next.run(req).await)
 }

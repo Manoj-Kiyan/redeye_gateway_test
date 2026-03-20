@@ -28,18 +28,26 @@ pub async fn forward_chat_completion(
     match provider {
         ProviderKind::OpenAi => openai_client::forward_chat_completion(client, api_key, body, accept_header).await,
         ProviderKind::Anthropic => {
-            let anthropic_api_key = providers
-                .anthropic_api_key
-                .as_deref()
-                .ok_or_else(|| GatewayError::Routing("ANTHROPIC_API_KEY is not configured".to_string()))?;
+            let anthropic_api_key = if api_key.trim().is_empty() {
+                providers
+                    .anthropic_api_key
+                    .as_deref()
+                    .ok_or_else(|| GatewayError::Routing("ANTHROPIC_API_KEY is not configured".to_string()))?
+            } else {
+                api_key
+            };
 
             anthropic_client::forward_chat_completion(client, anthropic_api_key, body).await
         }
         ProviderKind::Gemini => {
-            let gemini_api_key = providers
-                .gemini_api_key
-                .as_deref()
-                .ok_or_else(|| GatewayError::Routing("GEMINI_API_KEY is not configured".to_string()))?;
+            let gemini_api_key = if api_key.trim().is_empty() {
+                providers
+                    .gemini_api_key
+                    .as_deref()
+                    .ok_or_else(|| GatewayError::Routing("GEMINI_API_KEY is not configured".to_string()))?
+            } else {
+                api_key
+            };
 
             gemini_client::forward_chat_completion(client, gemini_api_key, body).await
         }

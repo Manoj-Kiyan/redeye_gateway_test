@@ -14,7 +14,7 @@ use axum::{
 use tracing::{error, info, instrument};
 
 use crate::domain::{models::{AppState, GatewayError, TraceContext}, provider::ProviderKind, routing::TenantRouteConfig};
-use crate::infrastructure::{audit_repository, routing_repository};
+use crate::infrastructure::{audit_repository, credential_repository, routing_repository};
 use crate::usecases::{proxy, routing};
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +27,11 @@ pub struct UpdateTenantRouteItem {
     pub provider: String,
     pub model: String,
     pub is_default: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RouteDryRunPayload {
+    pub model: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,12 +57,69 @@ pub struct AuditLogResponse {
     pub entries: Vec<audit_repository::AuditLogEntry>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub service: String,
+    pub checks: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RouteDryRunResponse {
+    pub tenant_id: String,
+    pub requested_model: String,
+    pub resolved_provider: String,
+    pub effective_model: String,
+    pub route_configured: bool,
+    pub provider_credential_configured: bool,
+}
+
 pub async fn health_check() -> impl IntoResponse {
     Json(json!({
         "status": "ok",
         "service": "redeye_gateway",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+pub async fn readiness_check(State(state): State<Arc<AppState>>) -> Json<ReadinessResponse> {
+    let db_ok = sqlx::query("SELECT 1")
+        .fetch_optional(&state.db_pool)
+        .await
+        .is_ok();
+
+    let redis_ok = match state.redis_pool.get().await {
+        Ok(mut conn) => deadpool_redis::redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+
+    let clickhouse_ok = state
+        .http_client
+        .get(&state.config.service_urls.clickhouse_url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map(|response| response.status().is_success() || response.status().as_u16() == 400)
+        .unwrap_or(false);
+
+    let overall_status = if db_ok && redis_ok && clickhouse_ok {
+        "ok"
+    } else {
+        "degraded"
+    };
+
+    Json(ReadinessResponse {
+        status: overall_status.to_string(),
+        service: "redeye_gateway".to_string(),
+        checks: json!({
+            "database": db_ok,
+            "redis": redis_ok,
+            "clickhouse": clickhouse_ok,
+        }),
+    })
 }
 
 #[instrument(skip(state, body))]
@@ -76,7 +138,31 @@ pub async fn chat_completions(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json");
 
-    let result = proxy::execute_proxy(&state, &body, &routing, &raw_prompt, accept, &trace_ctx).await?;
+    let result = match proxy::execute_proxy(&state, &body, &routing, &raw_prompt, accept, &trace_ctx).await {
+        Ok(result) => result,
+        Err(upstream_error @ (GatewayError::UpstreamUnreachable(_) | GatewayError::CircuitOpen(_))) => {
+            let fallback = routing::resolve_fallback_routing_decision(
+                state.as_ref(),
+                &routing.tenant_id,
+                routing.provider,
+            )
+            .await?;
+
+            match fallback {
+                Some(fallback_routing) => {
+                    tracing::warn!(
+                        failed_provider = routing.provider.as_str(),
+                        fallback_provider = fallback_routing.provider.as_str(),
+                        tenant_id = routing.tenant_id,
+                        "Primary upstream unavailable; attempting tenant fallback route"
+                    );
+                    proxy::execute_proxy(&state, &body, &fallback_routing, &raw_prompt, accept, &trace_ctx).await?
+                }
+                None => return Err(upstream_error),
+            }
+        }
+        Err(other) => return Err(other),
+    };
 
     let cache_header = if result.cache_hit { "HIT" } else { "MISS" };
 
@@ -203,11 +289,46 @@ pub async fn get_tenant_audit_logs(
     Ok(Json(AuditLogResponse { tenant_id, entries }))
 }
 
+pub async fn dry_run_tenant_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RouteDryRunPayload>,
+) -> Result<Json<RouteDryRunResponse>, GatewayError> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    let requested_model = payload.model.trim().to_string();
+    if requested_model.is_empty() {
+        return Err(GatewayError::InvalidRequest("model is required for route dry-run".to_string()));
+    }
+
+    let body = json!({ "model": requested_model });
+    let decision = routing::resolve_routing_decision(state.as_ref(), &headers, &body).await?;
+    let tenant_routes = routing_repository::fetch_tenant_routes(&state.db_pool, &tenant_id).await?;
+    let route_configured = tenant_routes
+        .iter()
+        .any(|route| route.requested_model == decision.requested_model);
+    let provider_credential_configured = credential_repository::has_provider_api_key(
+        state.as_ref(),
+        &tenant_id,
+        decision.provider,
+    )
+    .await;
+
+    Ok(Json(RouteDryRunResponse {
+        tenant_id,
+        requested_model: decision.requested_model,
+        resolved_provider: decision.provider.as_str().to_string(),
+        effective_model: decision.effective_model,
+        route_configured,
+        provider_credential_configured,
+    }))
+}
+
 pub async fn update_tenant_routes(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<UpdateTenantRoutesPayload>,
 ) -> Result<Json<TenantRoutesResponse>, GatewayError> {
+    ensure_minimum_role(&headers, "admin")?;
     let tenant_id = extract_tenant_id(&headers)?;
     let actor_user_id = extract_optional_user_id(&headers);
     validate_route_payload(&payload)?;
@@ -274,6 +395,26 @@ fn extract_optional_user_id(headers: &HeaderMap) -> Option<String> {
         .get("x-user-id")
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string)
+}
+
+fn ensure_minimum_role(headers: &HeaderMap, minimum_role: &str) -> Result<(), GatewayError> {
+    let current_role = headers
+        .get("x-user-role")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("viewer");
+
+    let rank = |role: &str| match role {
+        "owner" => 3,
+        "admin" => 2,
+        "viewer" => 1,
+        _ => 0,
+    };
+
+    if rank(current_role) < rank(minimum_role) {
+        return Err(GatewayError::Routing(format!("{minimum_role} role required for this action")));
+    }
+
+    Ok(())
 }
 
 fn validate_route_payload(payload: &UpdateTenantRoutesPayload) -> Result<(), GatewayError> {

@@ -9,6 +9,7 @@ pub struct GatewayConfig {
     pub redis_url: String,
     pub service_urls: ServiceUrls,
     pub rate_limit: RateLimitConfig,
+    pub circuit_breaker: CircuitBreakerConfig,
     pub providers: ProviderRegistry,
 }
 
@@ -23,6 +24,12 @@ pub struct ServiceUrls {
 pub struct RateLimitConfig {
     pub max_requests: u32,
     pub window_secs: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerConfig {
+    pub failure_threshold: u32,
+    pub open_window_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +54,10 @@ impl GatewayConfig {
             rate_limit: RateLimitConfig {
                 max_requests: required_env_parse("RATE_LIMIT_MAX_REQUESTS", 60u32, "RATE_LIMIT_MAX_REQUESTS must be a valid integer")?,
                 window_secs: required_env_parse("RATE_LIMIT_WINDOW_SECS", 60u32, "RATE_LIMIT_WINDOW_SECS must be a valid integer")?,
+            },
+            circuit_breaker: CircuitBreakerConfig {
+                failure_threshold: required_env_parse("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 3u32, "CIRCUIT_BREAKER_FAILURE_THRESHOLD must be a valid integer")?,
+                open_window_secs: required_env_parse("CIRCUIT_BREAKER_OPEN_WINDOW_SECS", 30u64, "CIRCUIT_BREAKER_OPEN_WINDOW_SECS must be a valid integer")?,
             },
             providers: ProviderRegistry {
                 default_provider: ProviderKind::OpenAi,

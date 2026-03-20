@@ -42,13 +42,27 @@ redeye-ai-engine/
 - Dashboard app: `cd redeye_dashboard && npm run dev`
 - Gateway service: `cargo run -p redeye_gateway`
 - Auth service: `cargo run -p redeye_auth`
+- Local CI verification: `powershell -ExecutionPolicy Bypass -File ./scripts/ci-verify.ps1`
+- Local integration smoke test: `powershell -ExecutionPolicy Bypass -File ./scripts/integration-smoke.ps1`
 
 ## Documentation
 
 - Quick start: `docs/guides/QUICKSTART.md`
 - Production deployment: `docs/guides/PRODUCTION_DEPLOYMENT.md`
+- Integration testing: `docs/guides/INTEGRATION_TESTING.md`
 - Structure guide: `docs/PROJECT_STRUCTURE.md`
 - Delivery reports: `docs/reports/`
+
+## CI
+
+- GitHub Actions workflow: `.github/workflows/ci.yml`
+- Runs on push and pull request
+- Covers:
+  - `cargo check -p redeye_auth`
+  - `cargo check -p redeye_gateway`
+  - `cargo test -p redeye_gateway`
+  - dashboard lint
+  - dashboard build
 
 ## Working Rules
 

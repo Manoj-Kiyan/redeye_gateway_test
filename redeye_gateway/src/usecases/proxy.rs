@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::domain::{models::{AppState, GatewayError, TraceContext}, routing::RoutingDecision};
-use crate::infrastructure::{cache_client, clickhouse_logger, provider_client};
+use crate::infrastructure::{cache_client, circuit_breaker, clickhouse_logger, provider_client};
 use crate::infrastructure::provider_client::ProviderResponseBody;
 
 pub enum ProxyBody {
@@ -30,6 +30,8 @@ pub async fn execute_proxy(
     trace_ctx: &TraceContext,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
+
+    circuit_breaker::ensure_closed(state.as_ref(), &routing.tenant_id, routing.provider).await?;
 
     if let Some(cached_content) = cache_client::lookup_cache(
         &state.http_client,
@@ -80,7 +82,22 @@ pub async fn execute_proxy(
         body,
         accept_header,
     )
-    .await?;
+    .await;
+
+    let upstream_response = match upstream_response {
+        Ok(response) => {
+            if response.status < 500 {
+                circuit_breaker::record_success(state.as_ref(), &routing.tenant_id, routing.provider).await;
+            } else {
+                circuit_breaker::record_failure(state.as_ref(), &routing.tenant_id, routing.provider).await;
+            }
+            response
+        }
+        Err(error) => {
+            circuit_breaker::record_failure(state.as_ref(), &routing.tenant_id, routing.provider).await;
+            return Err(error);
+        }
+    };
 
     info!(provider = routing.provider.as_str(), status = upstream_response.status, "Received upstream response");
 

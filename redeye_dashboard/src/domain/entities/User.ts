@@ -10,6 +10,7 @@ export interface ProviderCredentialStatus {
 export interface User {
   id: string;
   email: string;
+  role: 'owner' | 'admin' | 'viewer';
   workspaceName: string;
   openAiApiKey: string;
   onboardingComplete: boolean;

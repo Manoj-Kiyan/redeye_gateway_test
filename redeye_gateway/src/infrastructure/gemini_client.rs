@@ -137,3 +137,31 @@ fn extract_text_content(value: &Value) -> Option<String> {
             .join("\n")
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{extract_text_content, to_gemini_contents};
+
+    #[test]
+    fn gemini_message_conversion_maps_assistant_to_model() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"}
+            ]
+        });
+
+        let contents = to_gemini_contents(&body);
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[1]["role"], "model");
+    }
+
+    #[test]
+    fn gemini_extract_text_content_supports_string_payloads() {
+        let content = extract_text_content(&json!("plain text")).unwrap();
+        assert_eq!(content, "plain text");
+    }
+}

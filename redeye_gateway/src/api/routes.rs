@@ -27,6 +27,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(handlers::admin_metrics))
         .route("/catalog", get(handlers::get_provider_catalog))
         .route("/audit", get(handlers::get_tenant_audit_logs))
+        .route("/routes/dry-run", post(handlers::dry_run_tenant_route))
         .route("/routes", get(handlers::get_tenant_routes).put(handlers::update_tenant_routes))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -42,6 +43,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/v1", proxy_routes)
         .nest("/v1/admin", admin_routes)
         .route("/health", get(handlers::health_check))
+        .route("/ready", get(handlers::readiness_check))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::api::middleware::trace_context::trace_context_middleware,

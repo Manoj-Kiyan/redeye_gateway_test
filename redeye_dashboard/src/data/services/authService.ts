@@ -16,6 +16,13 @@ export interface ProviderStatus {
   workspaceName: string;
 }
 
+export interface TenantMember {
+  id: string;
+  email: string;
+  role: User['role'];
+  createdAt: string;
+}
+
 export interface TenantRoute {
   provider: 'openai' | 'anthropic' | 'gemini';
   model: string;
@@ -37,6 +44,15 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
+export interface RouteDryRunResult {
+  tenantId: string;
+  requestedModel: string;
+  resolvedProvider: TenantRoute['provider'];
+  effectiveModel: string;
+  routeConfigured: boolean;
+  providerCredentialConfigured: boolean;
+}
+
 interface ProviderStatusResponse {
   openai_configured: boolean;
   anthropic_configured: boolean;
@@ -47,7 +63,20 @@ interface ProviderStatusResponse {
 
 interface TenantRoutesResponse {
   tenant_id: string;
-  routes: TenantRoute[];
+  routes: Array<{
+    provider: TenantRoute['provider'];
+    model: string;
+    is_default: boolean;
+  }>;
+}
+
+interface TenantMembersResponse {
+  members: Array<{
+    id: string;
+    email: string;
+    role: User['role'];
+    created_at: string;
+  }>;
 }
 
 interface ProviderCatalogResponse {
@@ -70,6 +99,15 @@ interface AuditLogResponse {
   }>;
 }
 
+interface RouteDryRunResponse {
+  tenant_id: string;
+  requested_model: string;
+  resolved_provider: TenantRoute['provider'];
+  effective_model: string;
+  route_configured: boolean;
+  provider_credential_configured: boolean;
+}
+
 export interface IAuthUseCaseExtended extends IAuthUseCase {
   refreshToken(): Promise<User | null>;
   getProviderStatus(): Promise<ProviderStatus>;
@@ -82,6 +120,9 @@ export interface IAuthUseCaseExtended extends IAuthUseCase {
   getTenantRoutes(): Promise<TenantRoute[]>;
   updateTenantRoutes(routes: TenantRoute[]): Promise<TenantRoute[]>;
   getAuditLogs(): Promise<AuditLogEntry[]>;
+  dryRunTenantRoute(model: string): Promise<RouteDryRunResult>;
+  getTenantMembers(): Promise<TenantMember[]>;
+  updateMemberRole(memberId: string, role: User['role']): Promise<void>;
 }
 
 const AUTH_BASE_URL = 'http://localhost:8084/v1/auth';
@@ -95,6 +136,7 @@ interface AuthResponse {
   onboarding_complete: boolean;
   token: string;
   redeye_api_key?: string;
+  role: User['role'];
 }
 
 function getToken() {
@@ -111,10 +153,26 @@ function mapProviderStatus(resp: ProviderStatusResponse): ProviderStatus {
   };
 }
 
+function normalizeProvider(value: string): TenantRoute['provider'] {
+  const normalized = value.toLowerCase();
+  if (normalized === 'anthropic') return 'anthropic';
+  if (normalized === 'gemini') return 'gemini';
+  return 'openai';
+}
+
+function mapTenantRoutes(routes: TenantRoutesResponse['routes']): TenantRoute[] {
+  return routes.map((route) => ({
+    provider: normalizeProvider(route.provider),
+    model: route.model,
+    isDefault: route.is_default,
+  }));
+}
+
 function mapUser(resp: AuthResponse): User {
   return {
     id: resp.id,
     email: resp.email,
+    role: resp.role ?? 'owner',
     workspaceName: resp.workspace_name ?? '',
     openAiApiKey: '',
     onboardingComplete: resp.onboarding_complete ?? false,
@@ -148,7 +206,16 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
     }
   }
 
-  return res.json() as Promise<T>;
+  if (res.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await res.text();
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
 }
 
 export const authService: IAuthUseCaseExtended = {
@@ -257,7 +324,7 @@ export const authService: IAuthUseCaseExtended = {
       },
     });
 
-    return data.routes;
+    return mapTenantRoutes(data.routes);
   },
 
   async getProviderCatalog(): Promise<ProviderCatalogEntry[]> {
@@ -269,7 +336,7 @@ export const authService: IAuthUseCaseExtended = {
     });
 
     return data.providers.map((provider) => ({
-      provider: provider.provider,
+      provider: normalizeProvider(provider.provider),
       suggestedModels: provider.suggested_models,
     }));
   },
@@ -280,10 +347,16 @@ export const authService: IAuthUseCaseExtended = {
       headers: {
         Authorization: `Bearer ${getToken()}`,
       },
-      body: JSON.stringify({ routes }),
+      body: JSON.stringify({
+        routes: routes.map((route) => ({
+          provider: route.provider,
+          model: route.model,
+          is_default: route.isDefault,
+        })),
+      }),
     });
 
-    return data.routes;
+    return mapTenantRoutes(data.routes);
   },
 
   async getAuditLogs(): Promise<AuditLogEntry[]> {
@@ -303,5 +376,50 @@ export const authService: IAuthUseCaseExtended = {
       actorUserId: entry.actor_user_id,
       createdAt: entry.created_at,
     }));
+  },
+
+  async dryRunTenantRoute(model: string): Promise<RouteDryRunResult> {
+    const data = await requestJson<RouteDryRunResponse>(`${GATEWAY_BASE_URL}/routes/dry-run`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${getToken()}`,
+      },
+      body: JSON.stringify({ model }),
+    });
+
+    return {
+      tenantId: data.tenant_id,
+      requestedModel: data.requested_model,
+      resolvedProvider: data.resolved_provider,
+      effectiveModel: data.effective_model,
+      routeConfigured: data.route_configured,
+      providerCredentialConfigured: data.provider_credential_configured,
+    };
+  },
+
+  async getTenantMembers(): Promise<TenantMember[]> {
+    const data = await requestJson<TenantMembersResponse>(`${AUTH_BASE_URL}/members`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${getToken()}`,
+      },
+    });
+
+    return data.members.map((member) => ({
+      id: member.id,
+      email: member.email,
+      role: member.role,
+      createdAt: member.created_at,
+    }));
+  },
+
+  async updateMemberRole(memberId: string, role: User['role']): Promise<void> {
+    await requestJson<void>(`${AUTH_BASE_URL}/members/${memberId}/role`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${getToken()}`,
+      },
+      body: JSON.stringify({ role }),
+    });
   },
 };

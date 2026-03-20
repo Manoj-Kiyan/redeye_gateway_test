@@ -49,6 +49,14 @@ pub async fn fetch_provider_api_key(
     Ok(api_key)
 }
 
+pub async fn has_provider_api_key(
+    state: &AppState,
+    tenant_id: &str,
+    provider: ProviderKind,
+) -> bool {
+    fetch_provider_api_key(state, tenant_id, provider).await.is_ok()
+}
+
 async fn fetch_openai_fallback_from_tenants(
     state: &AppState,
     tenant_id: Uuid,

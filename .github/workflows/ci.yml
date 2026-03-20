@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  rust-checks:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check auth service
+        run: cargo check -p redeye_auth
+
+      - name: Check gateway service
+        run: cargo check -p redeye_gateway
+
+      - name: Test gateway
+        run: cargo test -p redeye_gateway
+
+  dashboard-build:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: redeye_dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: redeye_dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint dashboard
+        run: npm run lint
+
+      - name: Build dashboard
+        run: npm run build

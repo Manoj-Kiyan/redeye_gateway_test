@@ -24,6 +24,7 @@ interface DashboardViewProps {
   metrics: Metrics | null;
   chartData: { time: string; requests: number; latency: number }[];
   error: string | null;
+  showProviderSetupNotice?: boolean;
   onErrorClear?: () => void;
   calculateSavedCost: () => string;
 }
@@ -38,7 +39,7 @@ const tooltipStyle = {
   boxShadow: '0 0 20px rgba(99,102,241,0.10)',
 };
 
-export function DashboardView({ metrics, chartData, error, onErrorClear, calculateSavedCost }: DashboardViewProps) {
+export function DashboardView({ metrics, chartData, error, showProviderSetupNotice = false, onErrorClear, calculateSavedCost }: DashboardViewProps) {
   return (
     <div className="space-y-6">
       {/* Error Banner */}
@@ -48,6 +49,12 @@ export function DashboardView({ metrics, chartData, error, onErrorClear, calcula
           type="error"
           onClose={onErrorClear}
         />
+      )}
+
+      {showProviderSetupNotice && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-100">
+          No provider keys are configured yet. You can continue exploring the dashboard and configure OpenAI, Anthropic, or Gemini later from Settings.
+        </div>
       )}
 
       {/* Header */}

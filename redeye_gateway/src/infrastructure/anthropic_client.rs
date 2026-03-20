@@ -133,3 +133,31 @@ fn error_result(status: u16, response_json: Value) -> ProviderForwardResult {
         body: ProviderResponseBody::Buffered(serde_json::to_vec(&response_json).unwrap_or_default()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{extract_text_content, to_anthropic_messages};
+
+    #[test]
+    fn anthropic_message_conversion_handles_openai_style_messages() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [{"text": "world"}]}
+            ]
+        });
+
+        let messages = to_anthropic_messages(&body);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn anthropic_extract_text_content_supports_array_payloads() {
+        let content = extract_text_content(&json!([{ "text": "line1" }, { "text": "line2" }])).unwrap();
+        assert_eq!(content, "line1\nline2");
+    }
+}
