@@ -1,0 +1,154 @@
+# RedEye Policy Engine - Infrastructure Stack
+# Professional Production-Grade Architecture
+#
+# Services:
+#   - postgres     → User config, API keys, policy rules
+#   - redis        → Rate limiting counters, token bucket state
+#   - clickhouse   → Immutable append-only telemetry / audit log
+#   - gateway      → Rust Axum reverse proxy (built in Phase 2+)
+# ==============================================================================
+
+networks:
+  redeye-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  # Stores: tenants, API keys, routing rules, policy configurations.
+  # We pin to 16-alpine for a minimal, production-grade image.
+  postgres:
+    image: postgres:16-alpine
+    container_name: redeye_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-RedEye}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-RedEye_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-RedEye}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Seed script runs automatically on first boot
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - redeye-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-RedEye} -d ${POSTGRES_DB:-RedEye}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  # Stores: sliding-window rate limit counters, token bucket state per tenant.
+  # Now upgraded to redis-stack to support RediSearch and RedisJSON for vector embeddings.
+  redis:
+    image: redis/redis-stack-server:7.2.0-v8
+    container_name: redeye_redis
+    restart: unless-stopped
+    environment:
+      REDIS_ARGS: "--requirepass ${REDIS_PASSWORD:-redis_secret} --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy allkeys-lru"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - redeye-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ClickHouse ────────────────────────────────────────────────────────────────
+  # Stores: immutable request/response telemetry, PII audit events, latency logs.
+  # ClickHouse is chosen over Postgres for analytics because:
+  #   - Columnar storage → 10-100x faster aggregation queries (GROUP BY, SUM)
+  #   - MergeTree engine → append-only writes at millions of rows/sec
+  #   - Built-in TTL → auto-expire logs after 90 days
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: redeye_clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-RedEye}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_secret}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-RedEye_telemetry}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"   # HTTP interface (used by Rust client)
+      - "9000:9000"   # Native TCP interface
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./infra/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infra/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+    networks:
+      - redeye-net
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user=${CLICKHOUSE_USER:-RedEye} --password=${CLICKHOUSE_PASSWORD:-clickhouse_secret} --query='SELECT 1'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Authentication API ─────────────────────────────────────────────────────────
+  redeye_auth:
+    build:
+      context: .
+      dockerfile: ./redeye_auth/Dockerfile
+    container_name: redeye_auth
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-RedEye}:${POSTGRES_PASSWORD:-RedEye_secret}@postgres:5432/${POSTGRES_DB:-RedEye}
+      - JWT_SECRET=${JWT_SECRET}
+      - AES_MASTER_KEY=${AES_MASTER_KEY}
+      - SERVICE_NAME=redeye_auth
+      - SERVICE_PORT=8084
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - RUST_LOG=${RUST_LOG:-info}
+    networks:
+      - redeye-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Gateway API ────────────────────────────────────────────────────────────────
+  redeye_gateway:
+    build:
+      context: .
+      dockerfile: ./redeye_gateway/Dockerfile
+    container_name: redeye_gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-RedEye}:${POSTGRES_PASSWORD:-RedEye_secret}@postgres:5432/${POSTGRES_DB:-RedEye}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      - CLICKHOUSE_URL=http://${CLICKHOUSE_USER:-RedEye}:${CLICKHOUSE_PASSWORD:-clickhouse_secret}@clickhouse:8123
+      - JWT_SECRET=${JWT_SECRET}
+      - AES_MASTER_KEY=${AES_MASTER_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SERVICE_NAME=redeye_gateway
+      - GATEWAY_PORT=8080
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - RUST_LOG=${RUST_LOG:-info}
+    networks:
+      - redeye-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
