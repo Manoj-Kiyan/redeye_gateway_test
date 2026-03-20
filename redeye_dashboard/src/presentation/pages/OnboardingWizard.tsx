@@ -1,12 +1,11 @@
-// Presentation Page — OnboardingWizard
-// Step 1: Workspace name | Step 2: OpenAI API key
-// On finish → navigate /dashboard
+// Presentation Page - OnboardingWizard
+// Step 1: Workspace name | Step 2: Provider credentials
 
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ErrorBanner } from '../components/ui/ErrorBanner';
-import { Loader2, ChevronRight, KeyRound, Building2 } from 'lucide-react';
+import { Loader2, ChevronRight, KeyRound, Building2, ShieldCheck } from 'lucide-react';
 
 type Step = 1 | 2;
 
@@ -17,6 +16,8 @@ export function OnboardingWizard() {
   const [step, setStep] = useState<Step>(1);
   const [workspaceName, setWorkspaceName] = useState('');
   const [openAiApiKey, setOpenAiApiKey] = useState('');
+  const [anthropicApiKey, setAnthropicApiKey] = useState('');
+  const [geminiApiKey, setGeminiApiKey] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -28,11 +29,20 @@ export function OnboardingWizard() {
 
   async function handleFinish(e: FormEvent) {
     e.preventDefault();
-    if (!openAiApiKey.trim()) return;
+    if (!openAiApiKey.trim()) {
+      setError('OpenAI API key is required to complete onboarding.');
+      return;
+    }
+
     setError(null);
     setLoading(true);
     try {
-      await completeOnboarding(workspaceName.trim(), openAiApiKey.trim());
+      await completeOnboarding({
+        workspaceName: workspaceName.trim(),
+        openAiApiKey: openAiApiKey.trim(),
+        anthropicApiKey: anthropicApiKey.trim() || undefined,
+        geminiApiKey: geminiApiKey.trim() || undefined,
+      });
       navigate('/dashboard');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong.');
@@ -43,8 +53,7 @@ export function OnboardingWizard() {
 
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
-      <div className="w-full max-w-md">
-        {/* Brand + step indicator */}
+      <div className="w-full max-w-2xl">
         <div className="flex items-center justify-between mb-10">
           <div className="flex items-center gap-2.5">
             <div className="h-8 w-8 rounded-xl bg-indigo-600 flex items-center justify-center shadow-[0_0_20px_rgba(99,102,241,0.5)]">
@@ -52,7 +61,6 @@ export function OnboardingWizard() {
             </div>
             <span className="text-sm font-semibold text-slate-100">RedEye</span>
           </div>
-          {/* Step bubbles */}
           <div className="flex items-center gap-2">
             {([1, 2] as Step[]).map((s) => (
               <div
@@ -65,13 +73,12 @@ export function OnboardingWizard() {
           </div>
         </div>
 
-        {/* Step 1 */}
         {step === 1 && (
           <div className="glass-panel bg-slate-900/50 border border-slate-800 p-8">
             <Building2 className="w-7 h-7 text-indigo-400 mb-4" />
             <h1 className="text-xl font-bold text-slate-50 mb-1">Name your workspace</h1>
             <p className="text-sm text-slate-400 mb-7">
-              This appears in your dashboard and audit logs.
+              This appears in your dashboard, tracing metadata, and provider routing policies.
             </p>
             <form onSubmit={handleStep1} className="space-y-4">
               <input
@@ -93,28 +100,46 @@ export function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 2 */}
         {step === 2 && (
-          <div className="glass-panel bg-slate-900/50 border border-slate-800 p-8">
-            <KeyRound className="w-7 h-7 text-indigo-400 mb-4" />
-            <h1 className="text-xl font-bold text-slate-50 mb-1">Connect your OpenAI key</h1>
-            <p className="text-sm text-slate-400 mb-7">
-              Your key is stored encrypted and never logged in plaintext.
-            </p>
+          <div className="glass-panel bg-slate-900/50 border border-slate-800 p-8 space-y-6">
+            <div>
+              <KeyRound className="w-7 h-7 text-indigo-400 mb-4" />
+              <h1 className="text-xl font-bold text-slate-50 mb-1">Connect provider credentials</h1>
+              <p className="text-sm text-slate-400">
+                OpenAI is required today. Anthropic and Gemini are optional, but adding them now unlocks multi-provider routing later.
+              </p>
+            </div>
+
             <form onSubmit={handleFinish} className="space-y-4">
-              <input
-                type="password"
+              <CredentialField
+                label="OpenAI API Key"
                 required
-                autoFocus
                 value={openAiApiKey}
-                onChange={(e) => setOpenAiApiKey(e.target.value)}
-                placeholder="sk-••••••••••••••••"
-                className="w-full rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2.5 text-sm text-slate-100 font-mono placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
+                onChange={setOpenAiApiKey}
+                placeholder="sk-..."
+                helper="Required for onboarding and current default gateway path."
+              />
+              <CredentialField
+                label="Anthropic API Key"
+                value={anthropicApiKey}
+                onChange={setAnthropicApiKey}
+                placeholder="sk-ant-..."
+                helper="Optional. Used when tenant routes target Claude models."
+              />
+              <CredentialField
+                label="Gemini API Key"
+                value={geminiApiKey}
+                onChange={setGeminiApiKey}
+                placeholder="AIza..."
+                helper="Optional. Used when tenant routes target Gemini models."
               />
 
-              {error && (
-                <ErrorBanner error={error} type="error" onClose={() => setError(null)} />
-              )}
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-200 flex gap-3 items-start">
+                <ShieldCheck className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <p>Provider keys are encrypted before storage. Raw secrets are never shown again after submission.</p>
+              </div>
+
+              {error && <ErrorBanner error={error} type="error" onClose={() => setError(null)} />}
 
               <div className="flex gap-3">
                 <button
@@ -139,6 +164,33 @@ export function OnboardingWizard() {
 
         <p className="mt-5 text-center text-xs text-slate-600">Step {step} of 2</p>
       </div>
+    </div>
+  );
+}
+
+interface CredentialFieldProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  helper: string;
+  required?: boolean;
+}
+
+function CredentialField({ label, value, onChange, placeholder, helper, required = false }: CredentialFieldProps) {
+  return (
+    <div>
+      <label className="block text-sm font-semibold text-slate-200 mb-1.5">{label}</label>
+      <input
+        type="password"
+        required={required}
+        autoComplete="off"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2.5 text-sm text-slate-100 font-mono placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
+      />
+      <p className="mt-1.5 text-xs text-slate-500">{helper}</p>
     </div>
   );
 }

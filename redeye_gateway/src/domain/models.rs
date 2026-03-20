@@ -1,17 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+use crate::config::GatewayConfig;
+
 /// Application-wide shared state passed to every handler via Axum's `State` extractor.
 #[derive(Clone)]
 pub struct AppState {
     pub http_client: reqwest::Client,
-    pub openai_api_key: String,
-    pub cache_url: String,
     pub redis_pool: deadpool_redis::Pool,
     pub db_pool: sqlx::PgPool,
-    pub rate_limit_max: u32,
-    pub rate_limit_window: u32,
-    pub clickhouse_url: String,
-    pub tracer_url: String,
+    pub config: GatewayConfig,
 }
 
 /// Trace context propagated through every request.
@@ -33,6 +30,12 @@ pub enum GatewayError {
 
     #[error("Failed to execute internal proxy request: {0}")]
     Proxy(reqwest::Error),
+
+    #[error("Invalid gateway request: {0}")]
+    InvalidRequest(String),
+
+    #[error("Provider routing failed: {0}")]
+    Routing(String),
 }
 
 impl axum::response::IntoResponse for GatewayError {
@@ -52,6 +55,14 @@ impl axum::response::IntoResponse for GatewayError {
             GatewayError::Proxy(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "An internal error occurred while communicating with backend cluster services.",
+            ),
+            GatewayError::InvalidRequest(_) => (
+                StatusCode::BAD_REQUEST,
+                "The gateway request was invalid.",
+            ),
+            GatewayError::Routing(_) => (
+                StatusCode::BAD_REQUEST,
+                "The requested model or provider is not available for this tenant.",
             ),
         };
 

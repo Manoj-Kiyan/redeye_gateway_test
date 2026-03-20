@@ -1,3 +1,9 @@
 pub mod openai_client;
+pub mod anthropic_client;
+pub mod gemini_client;
 pub mod clickhouse_logger;
 pub mod cache_client;
+pub mod provider_client;
+pub mod routing_repository;
+pub mod credential_repository;
+pub mod audit_repository;

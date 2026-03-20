@@ -3,33 +3,28 @@
 -- Runs automatically on first container boot via docker-entrypoint-initdb.d
 -- ==============================================================================
 
--- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- ── Tenants ───────────────────────────────────────────────────────────────────
--- Each enterprise customer is a "tenant". All resources are tenant-scoped.
 CREATE TABLE IF NOT EXISTS tenants (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT NOT NULL UNIQUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    is_active   BOOLEAN NOT NULL DEFAULT TRUE
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    encrypted_openai_key BYTEA,
+    redeye_api_key TEXT UNIQUE,
+    onboarding_status BOOLEAN NOT NULL DEFAULT FALSE
 );
 
--- ── API Keys ──────────────────────────────────────────────────────────────────
--- Keys issued to tenant applications for authenticating with the gateway.
--- `key_hash` stores a SHA-256 hash — the raw key is never persisted.
 CREATE TABLE IF NOT EXISTS api_keys (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    key_hash    TEXT NOT NULL UNIQUE,       -- SHA-256(raw_key) stored in hex
-    name        TEXT NOT NULL,              -- Human-readable label (e.g. "prod-app-1")
+    key_hash    TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at  TIMESTAMPTZ,               -- NULL = never expires
+    expires_at  TIMESTAMPTZ,
     is_active   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
--- ── Rate Limit Policies ───────────────────────────────────────────────────────
--- Per-tenant rate limit configuration. Applied by the Redis layer in Phase 3.
 CREATE TABLE IF NOT EXISTS rate_limit_policies (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -39,18 +34,45 @@ CREATE TABLE IF NOT EXISTS rate_limit_policies (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── LLM Routes ───────────────────────────────────────────────────────────────
--- Defines which upstream LLM provider a tenant's traffic is routed to.
 CREATE TABLE IF NOT EXISTS llm_routes (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    provider    TEXT NOT NULL CHECK (provider IN ('openai', 'anthropic')),
-    model       TEXT NOT NULL,             -- e.g. "gpt-4o", "claude-sonnet-4-20250514"
+    provider    TEXT NOT NULL CHECK (provider IN ('openai', 'anthropic', 'gemini')),
+    model       TEXT NOT NULL,
     is_default  BOOLEAN NOT NULL DEFAULT FALSE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── Seed Data (Development) ───────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS provider_credentials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN ('openai', 'anthropic', 'gemini')),
+    encrypted_api_key BYTEA NOT NULL,
+    is_primary BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    service TEXT NOT NULL CHECK (service IN ('auth', 'gateway')),
+    action TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 INSERT INTO tenants (id, name) VALUES
     ('00000000-0000-0000-0000-000000000001', 'acme-corp'),
     ('00000000-0000-0000-0000-000000000002', 'globex-inc')

@@ -1,6 +1,7 @@
 // src/presentation/context/AuthContext.tsx
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import type { User } from '../../domain/entities/User';
+import type { OnboardingPayload } from '../../domain/usecases/AuthUseCase';
 import { authService } from '../../data/services/authService';
 
 interface AuthContextValue {
@@ -8,8 +9,8 @@ interface AuthContextValue {
   isInitializing: boolean;
   user: User | null;
   login(email: string, password: string): Promise<void>;
-  signup(email: string, password: string): Promise<void>;
-  completeOnboarding(workspaceName: string, openAiApiKey: string): Promise<void>;
+  signup(email: string, password: string, companyName: string): Promise<void>;
+  completeOnboarding(payload: OnboardingPayload): Promise<void>;
   logout(): void;
 }
 
@@ -24,15 +25,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const token = localStorage.getItem('re_token');
 
       if (token) {
-        try {
-          setUser({
-            id: '1',
-            email: 'user@company.com',
-            workspaceName: '',
-            openAiApiKey: '',
-            onboardingComplete: true,
-          });
-        } catch {
+        const refreshedUser = await authService.refreshToken();
+        if (refreshedUser) {
+          setUser(refreshedUser);
+        } else {
           localStorage.removeItem('re_token');
         }
       }
@@ -48,17 +44,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(nextUser);
   }, []);
 
-  const signup = useCallback(async (email: string, password: string) => {
-    const nextUser = await authService.signup({ email, password });
+  const signup = useCallback(async (email: string, password: string, companyName: string) => {
+    const nextUser = await authService.signup({ email, password, companyName });
     setUser(nextUser);
   }, []);
 
-  const completeOnboarding = useCallback(async (workspaceName: string, openAiApiKey: string) => {
+  const completeOnboarding = useCallback(async (payload: OnboardingPayload) => {
     if (!user) {
       throw new Error('Not authenticated');
     }
 
-    const updatedUser = await authService.completeOnboarding(user.id, workspaceName, openAiApiKey);
+    const updatedUser = await authService.completeOnboarding(user.id, payload);
     setUser(updatedUser);
   }, [user]);
 

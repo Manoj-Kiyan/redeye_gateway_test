@@ -9,7 +9,6 @@ use aes_gcm::{
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
 use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
-use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
 use serde::{Deserialize, Serialize};
 use std::env;
 use uuid::Uuid;
@@ -174,3 +173,4 @@ pub fn generate_redeye_api_key() -> String {
         .collect();
     format!("re-sk-{}", random_string)
 }
+

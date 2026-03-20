@@ -1,7 +1,4 @@
-//! src/api/middleware/rate_limit.rs — Redis Fixed Window rate limiter.
-//!
-//! Applies an atomic Lua script (INCR + conditional EXPIRE) to enforce
-//! a per-tenant or per-IP request limit.
+//! src/api/middleware/rate_limit.rs - Redis Fixed Window rate limiter.
 
 use std::sync::Arc;
 
@@ -35,28 +32,28 @@ pub async fn rate_limit_middleware(
 ) -> Result<Response, StatusCode> {
     let identifier = headers
         .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()))
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()))
         .unwrap_or("anonymous");
 
-    let redis_key = format!("rl:tenant:{}", identifier);
+    let redis_key = format!("rl:tenant:{identifier}");
 
-    let mut conn = state.redis_pool.get().await.map_err(|e| {
-        error!(error = %e, "Failed to get Redis connection from pool");
+    let mut conn = state.redis_pool.get().await.map_err(|error| {
+        error!(error = %error, "Failed to get Redis connection from pool");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     let script = redis::Script::new(RATE_LIMIT_LUA);
-    let limit = state.rate_limit_max;
-    let window_secs = state.rate_limit_window;
+    let limit = state.config.rate_limit.max_requests;
+    let window_secs = state.config.rate_limit.window_secs;
 
     let current_requests: i64 = script
         .key(&redis_key)
         .arg(window_secs)
         .invoke_async(&mut conn)
         .await
-        .map_err(|e| {
-            error!(error = %e, "Redis rate limit script execution failed");
+        .map_err(|error| {
+            error!(error = %error, "Redis rate limit script execution failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -68,24 +65,28 @@ pub async fn rate_limit_middleware(
         _ => conn.ttl(&redis_key).await.unwrap_or(window_secs as i64),
     };
 
-    if current_requests > (limit as i64) {
+    if current_requests > limit as i64 {
         warn!(tenant = identifier, "Rate limit exceeded (429)");
         let mut response = Json(json!({
-            "error": {"code": 429, "message": format!("Rate limit exceeded. Maximum {} requests per {} seconds.", limit, window_secs)}
-        })).into_response();
+            "error": {
+                "code": 429,
+                "message": format!("Rate limit exceeded. Maximum {limit} requests per {window_secs} seconds.")
+            }
+        }))
+        .into_response();
         *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        let h = response.headers_mut();
-        h.insert("x-ratelimit-limit", HeaderValue::from(limit));
-        h.insert("x-ratelimit-remaining", HeaderValue::from(0));
-        h.insert("x-ratelimit-reset", HeaderValue::from(ttl));
+        let response_headers = response.headers_mut();
+        response_headers.insert("x-ratelimit-limit", HeaderValue::from(limit));
+        response_headers.insert("x-ratelimit-remaining", HeaderValue::from(0));
+        response_headers.insert("x-ratelimit-reset", HeaderValue::from(ttl));
         return Ok(response);
     }
 
     let mut response = next.run(request).await;
-    let h = response.headers_mut();
-    h.insert("x-ratelimit-limit", HeaderValue::from(limit));
-    h.insert("x-ratelimit-remaining", HeaderValue::from(remaining));
-    h.insert("x-ratelimit-reset", HeaderValue::from(ttl));
+    let response_headers = response.headers_mut();
+    response_headers.insert("x-ratelimit-limit", HeaderValue::from(limit));
+    response_headers.insert("x-ratelimit-remaining", HeaderValue::from(remaining));
+    response_headers.insert("x-ratelimit-reset", HeaderValue::from(ttl));
 
     Ok(response)
 }

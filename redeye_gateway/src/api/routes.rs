@@ -1,4 +1,4 @@
-//! api/routes.rs — Single source of truth for all route registrations.
+//! api/routes.rs - Single source of truth for all route registrations.
 
 use std::sync::Arc;
 
@@ -12,7 +12,6 @@ use crate::api::handlers;
 use crate::domain::models::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    // LLM routes with rate limiting and authentication
     let proxy_routes = Router::new()
         .route("/chat/completions", post(handlers::chat_completions))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -24,11 +23,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             crate::api::middleware::rate_limit::rate_limit_middleware,
         ));
 
-    // Admin routes
     let admin_routes = Router::new()
-        .route("/metrics", get(handlers::admin_metrics));
+        .route("/metrics", get(handlers::admin_metrics))
+        .route("/catalog", get(handlers::get_provider_catalog))
+        .route("/audit", get(handlers::get_tenant_audit_logs))
+        .route("/routes", get(handlers::get_tenant_routes).put(handlers::update_tenant_routes))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::api::middleware::auth::auth_middleware,
+        ));
 
-    // CORS for React dashboard
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -38,7 +42,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/v1", proxy_routes)
         .nest("/v1/admin", admin_routes)
         .route("/health", get(handlers::health_check))
-        // Global trace context middleware
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::api::middleware::trace_context::trace_context_middleware,
@@ -46,3 +49,4 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .layer(cors)
         .with_state(state)
 }
+

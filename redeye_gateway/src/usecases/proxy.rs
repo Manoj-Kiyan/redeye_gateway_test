@@ -1,16 +1,14 @@
-//! usecases/proxy.rs — Core proxy orchestration logic.
-//!
-//! This is the heart of the gateway: cache check → upstream call → async telemetry.
-//! It is intentionally free of Axum types so it can be tested or reused independently.
+//! usecases/proxy.rs - Core proxy orchestration logic.
+//! This is the heart of the gateway: cache check -> upstream call -> async telemetry.
 
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
-use crate::domain::models::{AppState, GatewayError, TraceContext};
-use crate::infrastructure::{cache_client, clickhouse_logger, openai_client};
+use crate::domain::{models::{AppState, GatewayError, TraceContext}, routing::RoutingDecision};
+use crate::infrastructure::{cache_client, clickhouse_logger, provider_client};
+use crate::infrastructure::provider_client::ProviderResponseBody;
 
-/// Result of a proxy execution — either a cached response or an upstream response.
 pub enum ProxyBody {
     Buffered(Vec<u8>),
     Stream(reqwest::Response),
@@ -23,38 +21,47 @@ pub struct ProxyResult {
     pub cache_hit: bool,
 }
 
-/// Execute the full proxy pipeline: cache → upstream → async telemetry.
 pub async fn execute_proxy(
     state: &Arc<AppState>,
     body: &Value,
-    tenant_id: &str,
-    model_name: &str,
+    routing: &RoutingDecision,
     raw_prompt: &str,
     accept_header: &str,
     trace_ctx: &TraceContext,
-    dynamic_openai_key: &str,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
 
-    // ── 1. Semantic Cache Lookup ────────────────────────────────────────────
     if let Some(cached_content) = cache_client::lookup_cache(
-        &state.http_client, &state.cache_url, tenant_id, model_name, raw_prompt
-    ).await {
+        &state.http_client,
+        &state.config.service_urls.cache_url,
+        &routing.tenant_id,
+        &routing.effective_model,
+        raw_prompt,
+    )
+    .await
+    {
         let mock_response = json!({
             "id": "chatcmpl-cached",
             "object": "chat.completion",
             "created": 0,
-            "model": model_name,
+            "model": routing.effective_model,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": cached_content}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         });
 
         let bytes = serde_json::to_vec(&mock_response).unwrap_or_default();
 
-        // Fire async telemetry even for cache hits
         fire_async_telemetry(
-            state, tenant_id, model_name, raw_prompt, trace_ctx,
-            200, start_time.elapsed().as_millis() as u32, 0, true, None,
+            state,
+            &routing.tenant_id,
+            &routing.effective_model,
+            raw_prompt,
+            trace_ctx,
+            200,
+            start_time.elapsed().as_millis() as u32,
+            0,
+            true,
+            None,
         );
 
         return Ok(ProxyResult {
@@ -65,37 +72,69 @@ pub async fn execute_proxy(
         });
     }
 
-    // ── 2. Forward to OpenAI ────────────────────────────────────────────────
-    let upstream_response = openai_client::forward_chat_completion(
-        &state.http_client, dynamic_openai_key, body, accept_header,
-    ).await?;
+    let upstream_response = provider_client::forward_chat_completion(
+        &state.http_client,
+        &state.config.providers,
+        routing.provider,
+        &routing.upstream_api_key,
+        body,
+        accept_header,
+    )
+    .await?;
 
-    let upstream_status = upstream_response.status().as_u16();
-    let content_type = upstream_response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
+    info!(provider = routing.provider.as_str(), status = upstream_response.status, "Received upstream response");
 
-    info!(status = upstream_status, "Received response from OpenAI");
+    match upstream_response.body {
+        ProviderResponseBody::Stream(response) => handle_streaming_or_buffered_openai(
+            state,
+            body,
+            routing,
+            raw_prompt,
+            trace_ctx,
+            upstream_response.status,
+            upstream_response.content_type,
+            response,
+            start_time,
+        ).await,
+        ProviderResponseBody::Buffered(body_bytes) => handle_buffered_response(
+            state,
+            routing,
+            raw_prompt,
+            trace_ctx,
+            upstream_response.status,
+            upstream_response.content_type,
+            body_bytes,
+            start_time,
+        ),
+    }
+}
 
+async fn handle_streaming_or_buffered_openai(
+    state: &Arc<AppState>,
+    body: &Value,
+    routing: &RoutingDecision,
+    raw_prompt: &str,
+    trace_ctx: &TraceContext,
+    status: u16,
+    content_type: String,
+    response: reqwest::Response,
+    start_time: std::time::Instant,
+) -> Result<ProxyResult, GatewayError> {
     let is_streaming = body
         .get("stream")
-        .and_then(|v| v.as_bool())
+        .and_then(|value| value.as_bool())
         .unwrap_or(false);
 
     if is_streaming {
         let latency_ms = start_time.elapsed().as_millis() as u32;
 
-        // Fire minimal async telemetry for streaming responses (no tokens/cache).
         fire_async_telemetry(
             state,
-            tenant_id,
-            model_name,
+            &routing.tenant_id,
+            &routing.effective_model,
             raw_prompt,
             trace_ctx,
-            upstream_status,
+            status,
             latency_ms,
             0,
             false,
@@ -103,39 +142,86 @@ pub async fn execute_proxy(
         );
 
         return Ok(ProxyResult {
-            status: upstream_status,
+            status,
             content_type,
-            body: ProxyBody::Stream(upstream_response),
+            body: ProxyBody::Stream(response),
             cache_hit: false,
         });
     }
 
-    // Buffer the response for telemetry + cache storage (non-streaming)
-    let body_bytes = upstream_response.bytes().await.unwrap_or_default().to_vec();
+    let body_bytes = response.bytes().await.unwrap_or_default().to_vec();
+    Ok(finalize_buffered_response(
+        state,
+        routing,
+        raw_prompt,
+        trace_ctx,
+        status,
+        content_type,
+        body_bytes,
+        start_time,
+    ))
+}
+
+fn handle_buffered_response(
+    state: &Arc<AppState>,
+    routing: &RoutingDecision,
+    raw_prompt: &str,
+    trace_ctx: &TraceContext,
+    status: u16,
+    content_type: String,
+    body_bytes: Vec<u8>,
+    start_time: std::time::Instant,
+) -> Result<ProxyResult, GatewayError> {
+    Ok(finalize_buffered_response(
+        state,
+        routing,
+        raw_prompt,
+        trace_ctx,
+        status,
+        content_type,
+        body_bytes,
+        start_time,
+    ))
+}
+
+fn finalize_buffered_response(
+    state: &Arc<AppState>,
+    routing: &RoutingDecision,
+    raw_prompt: &str,
+    trace_ctx: &TraceContext,
+    status: u16,
+    content_type: String,
+    body_bytes: Vec<u8>,
+    start_time: std::time::Instant,
+) -> ProxyResult {
     let latency_ms = start_time.elapsed().as_millis() as u32;
 
-    // Extract token usage from OpenAI response
     let tokens = serde_json::from_slice::<Value>(&body_bytes)
         .ok()
-        .and_then(|v| v["usage"]["total_tokens"].as_u64())
+        .and_then(|value| value["usage"]["total_tokens"].as_u64())
         .unwrap_or(0) as u32;
 
-    // ── 3. Fire async telemetry ─────────────────────────────────────────────
     fire_async_telemetry(
-        state, tenant_id, model_name, raw_prompt, trace_ctx,
-        upstream_status, latency_ms, tokens, false,
+        state,
+        &routing.tenant_id,
+        &routing.effective_model,
+        raw_prompt,
+        trace_ctx,
+        status,
+        latency_ms,
+        tokens,
+        false,
         Some(body_bytes.clone()),
     );
 
-    Ok(ProxyResult {
-        status: upstream_status,
+    ProxyResult {
+        status,
         content_type,
         body: ProxyBody::Buffered(body_bytes),
         cache_hit: false,
-    })
+    }
 }
 
-/// Spawns a detached background task for ClickHouse logging, tracer ingestion, and cache storage.
 fn fire_async_telemetry(
     state: &Arc<AppState>,
     tenant_id: &str,
@@ -148,45 +234,64 @@ fn fire_async_telemetry(
     cache_hit: bool,
     response_bytes: Option<Vec<u8>>,
 ) {
-    let s = state.clone();
-    let tid = tenant_id.to_string();
-    let model = model_name.to_string();
-    let prompt = raw_prompt.to_string();
-    let ctx = trace_ctx.clone();
+    let state = state.clone();
+    let tenant_id = tenant_id.to_string();
+    let model_name = model_name.to_string();
+    let raw_prompt = raw_prompt.to_string();
+    let trace_ctx = trace_ctx.clone();
 
     tokio::spawn(async move {
-        // 3a. ClickHouse request_logs
         clickhouse_logger::log_request(
-            &s.http_client, &s.clickhouse_url,
-            &tid, &ctx.trace_id, &ctx.session_id,
-            status_code, latency_ms, &model, tokens, cache_hit,
-        ).await;
+            &state.http_client,
+            &state.config.service_urls.clickhouse_url,
+            &tenant_id,
+            &trace_ctx.trace_id,
+            &trace_ctx.session_id,
+            status_code,
+            latency_ms,
+            &model_name,
+            tokens,
+            cache_hit,
+        )
+        .await;
 
-        // 3b. Send to redeye_tracer for deep tracing + compliance audit
-        let response_content = response_bytes.as_ref()
-            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
-            .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()))
+        let response_content = response_bytes
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+            .and_then(|value| value["choices"][0]["message"]["content"].as_str().map(str::to_string))
             .unwrap_or_default();
 
         let trace_payload = json!({
-            "trace_id": ctx.trace_id,
-            "session_id": ctx.session_id,
-            "parent_trace_id": ctx.parent_trace_id,
-            "tenant_id": tid,
-            "model": model,
+            "trace_id": trace_ctx.trace_id,
+            "session_id": trace_ctx.session_id,
+            "parent_trace_id": trace_ctx.parent_trace_id,
+            "tenant_id": tenant_id,
+            "model": model_name,
             "status": status_code,
             "latency_ms": latency_ms,
             "total_tokens": tokens,
             "cache_hit": cache_hit,
-            "prompt_content": prompt,
+            "prompt_content": raw_prompt,
             "response_content": response_content
         });
 
-        clickhouse_logger::send_trace_to_tracer(&s.http_client, &s.tracer_url, &trace_payload).await;
+        clickhouse_logger::send_trace_to_tracer(
+            &state.http_client,
+            &state.config.service_urls.tracer_url,
+            &trace_payload,
+        )
+        .await;
 
-        // 3c. Cache storage (only on successful non-cached JSON responses)
         if !cache_hit && status_code == 200 && !response_content.is_empty() {
-            cache_client::store_in_cache(&s.http_client, &s.cache_url, &tid, &model, &prompt, &response_content).await;
+            cache_client::store_in_cache(
+                &state.http_client,
+                &state.config.service_urls.cache_url,
+                &tenant_id,
+                &model_name,
+                &raw_prompt,
+                &response_content,
+            )
+            .await;
         }
     });
 }

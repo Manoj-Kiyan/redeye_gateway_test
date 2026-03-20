@@ -17,6 +17,7 @@ export function AuthPage() {
   const [tab, setTab] = useState<Tab>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [companyName, setCompanyName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -28,7 +29,7 @@ export function AuthPage() {
       if (tab === 'login') {
         await login(email, password);
       } else {
-        await signup(email, password);
+        await signup(email, password, companyName.trim());
       }
       // After login/signup, check onboarding state via auth context user
       // We navigate to onboarding; DashboardLayout will redirect if already complete
@@ -97,6 +98,21 @@ export function AuthPage() {
                 className="w-full rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
               />
             </div>
+
+            {tab === 'signup' && (
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1.5">Workspace Name</label>
+                <input
+                  type="text"
+                  required
+                  autoComplete="organization"
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  placeholder="e.g. Manoj Labs"
+                  className="w-full rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
+                />
+              </div>
+            )}
 
             {error && (
               <ErrorBanner error={error} type="error" onClose={() => setError(null)} />
